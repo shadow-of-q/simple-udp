@@ -6,7 +6,7 @@ CXXFLAGS=$(CXXDEBUGFLAGS) -I./
 CLIENT_OBJS=client.o network.o net.o
 SERVER_OBJS=server.o network.o net.o
 all: client server
-HEADERS=sys.hpp
+HEADERS=sys.hpp net.hpp
 client.o: client.cpp $(HEADERS)
 server.o: server.cpp $(HEADERS)
 sys.o: sys.cpp $(HEADERS)
@@ -14,7 +14,7 @@ sys.o: sys.cpp $(HEADERS)
 client: $(CLIENT_OBJS)
 	$(CXX) $(CXXFLAGS) -o client $(CLIENT_OBJS)
 
-server: server.o network.o
+server: $(SERVER_OBJS)
 	$(CXX) $(CXXFLAGS) -o server $(SERVER_OBJS)
 
 clean:
