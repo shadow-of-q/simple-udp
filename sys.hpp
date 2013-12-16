@@ -382,6 +382,10 @@ template <class T> struct vector : noncopyable {
     new (&buf[ulen]) T;
     return buf[ulen++];
   }
+  T *begin() { return buf; }
+  T *end() { return buf+ulen; }
+  const T *begin() const { return buf; }
+  const T *end() const { return buf+ulen; }
   INLINE T &pop(void) { return buf[--ulen]; }
   INLINE T &last(void) { return buf[ulen-1]; }
   INLINE bool empty(void) { return ulen==0; }

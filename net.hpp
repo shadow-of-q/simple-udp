@@ -18,7 +18,7 @@ struct address {
 
 // buffers are fixed-size-allocated for maximum simplicity
 struct buffer {
-  buffer(u32 len = 0, char *ptr = NULL);
+  buffer(void) : len(0) {}
   u32 len;
   char data[BUF_SZ];
 };
@@ -26,11 +26,28 @@ struct buffer {
 // very basic udp socket interface
 struct socket {
   socket(u16 port = 0); // port == 0 means client (no bind operation)
+  ~socket();
   int receive(buffer &buf) const;
   int receive(address &addr, buffer &buf) const;
   int send(const address &addr, const buffer &buf) const;
   int fd;
 };
+
+struct channel {
+  static channel *create(const address &addr);
+  static void destroy(channel*);
+  void disconnect();
+  void send(int reliable, const char *fmt, ...);
+  int rcv(const char *fmt, ...);
+  void flush();
+};
+
+struct server {
+  static server *create(u16 port);
+  static void destroy(server*);
+  channel *activechannel();
+};
+
 } /* namespace net */
 } /* namespace q */
 
