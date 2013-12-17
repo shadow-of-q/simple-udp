@@ -12,8 +12,8 @@ struct address {
   INLINE address() {}
   address(u32 addr, u16 port);
   address(const char *addr, u16 port);
-  u32 ip;
-  u16 port;
+  u32 m_ip;
+  u16 m_port;
 };
 
 // buffers are fixed-size-allocated for maximum simplicity
@@ -37,7 +37,7 @@ struct channel {
   static channel *create(const address &addr);
   static void destroy(channel*);
   void disconnect();
-  void send(int reliable, const char *fmt, ...);
+  void send(bool reliable, const char *fmt, ...);
   int rcv(const char *fmt, ...);
   void flush();
 };

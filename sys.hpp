@@ -158,6 +158,7 @@
 #define rangei(m,M) range(i,m,M)
 #define rangej(m,M) range(j,m,M)
 #define rangek(m,M) range(k,m,M)
+#define ZERO(PTR, SIZE) memset(PTR, 0, sizeof(SIZE))
 #define MAKE_VARIADIC(NAME)\
 INLINE void NAME##v(void) {}\
 template <typename First, typename... Rest>\
