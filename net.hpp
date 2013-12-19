@@ -4,9 +4,6 @@
 namespace q {
 namespace net {
 
-static const u32 MTU = 1400;
-static const u32 BUF_SZ = MTU - 128;
-
 // ipv4 address
 struct address {
   INLINE address() {}
@@ -16,11 +13,21 @@ struct address {
   u16 m_port;
 };
 
+static const u32 MTU = 1400;
+
 // buffers are fixed-size-allocated for maximum simplicity
 struct buffer {
   buffer(void) : len(0) {}
+  template <typename T> INLINE void append(const T &x) {
+    (T&)data[len]=x;
+    len+=sizeof(T);
+  }
+  INLINE void copy(const char *src, u32 sz) {
+    memcpy(data+len,src,sz);
+    len+=sz;
+  }
   u32 len;
-  char data[BUF_SZ];
+  char data[MTU];
 };
 
 // very basic udp socket interface

@@ -204,14 +204,14 @@ void keyrepeat(bool on);
 float millis();
 char *path(char *s);
 char *loadfile(const char *fn, int *size=NULL);
-void initendiancheck(void);
-int islittleendian(void);
+void initendiancheck();
+int islittleendian();
 void endianswap(void *memory, int stride, int length);
 
 /*-------------------------------------------------------------------------
  - memory debugging / tracking facilities
  -------------------------------------------------------------------------*/
-void meminit(void);
+void meminit();
 void *memalloc(size_t sz, const char *filename, int linenum);
 void *memrealloc(void *ptr, size_t sz, const char *filename, int linenum);
 void memfree(void *);
@@ -298,22 +298,33 @@ template <class T, class U> INLINE T max(T t, U u) {return t>T(u)?t:T(u);}
 
 // makes a class non-copyable
 class noncopyable {
-  protected:
-    INLINE noncopyable(void) {}
-    INLINE ~noncopyable(void) {}
-  private:
-    INLINE noncopyable(const noncopyable&) {}
-    INLINE noncopyable& operator= (const noncopyable&) {return *this;}
+protected:
+  INLINE noncopyable() {}
+  INLINE ~noncopyable() {}
+private:
+  INLINE noncopyable(const noncopyable&) {}
+  INLINE noncopyable& operator= (const noncopyable&) {return *this;}
 };
 
-// very simple fixed size circular buffer
+// very simple fixed size circular buffer that wraps around
 template <typename T, u32 max_n> struct DEFAULT_ALIGNED ringbuffer {
   INLINE ringbuffer() : first(0x7fffffff), n(0) {}
-  INLINE T &append() { n=max(n+1,max_n); return items[(first+n-1)%max_n]; }
-  INLINE T &prepend() { n=max(n+1,max_n); return items[--first%max_n]; }
+  INLINE T &back()  {return items[(first+n-1)%max_n];}
+  INLINE T &front() {return items[first%max_n];}
+  INLINE void popfront() {if (n!=0) {first++;--n;}}
+  INLINE void popback()  {if (n!=0) {--n;}}
+  INLINE T &addback() {
+    if (n==max_n) popfront(); ++n;
+    return items[(first+n-1)%max_n];
+  }
+  INLINE T &addfront() {
+    if (n==max_n) popback(); ++n;
+    return items[--first%max_n];
+  }
   INLINE T &operator[](u32 idx) { return items[(first+idx)%max_n]; }
-  INLINE u32 empty() const {return n==0;}
-  INLINE T &back() {return items[(first+n-1)%max_n];}
+  INLINE u32 size() const {return n;}
+  INLINE bool empty() const {return n==0;}
+  INLINE bool full() const {return n==max_n;}
   T items[max_n];
   u32 first, n;
 };
@@ -371,31 +382,40 @@ template <typename T, u32 max_n=1024> struct hashtable : noncopyable {
 template <class T> struct vector : noncopyable {
   T *buf;
   int alen, ulen;
-  INLINE vector(void) : alen(8), ulen(0) { buf = (T*) malloc(alen*sizeof(T)); }
-  INLINE ~vector(void) { setsize(0); free(buf); }
+  INLINE vector() : buf(NULL), alen(0), ulen(0) {}
+  INLINE ~vector() { setsize(0); free(buf); }
   INLINE T &add(const T &x) {
     if (ulen==alen) realloc();
     new (&buf[ulen]) T(x);
     return buf[ulen++];
   }
-  INLINE T &add(void) {
+  INLINE T &add() {
     if (ulen==alen) realloc();
     new (&buf[ulen]) T;
     return buf[ulen++];
+  }
+  pair<T*,u32> move() {
+    const auto dst = makepair(buf,u32(ulen));
+    alen = ulen = 0;
+    buf = NULL;
+    return dst;
   }
   T *begin() { return buf; }
   T *end() { return buf+ulen; }
   const T *begin() const { return buf; }
   const T *end() const { return buf+ulen; }
-  INLINE T &pop(void) { return buf[--ulen]; }
-  INLINE T &last(void) { return buf[ulen-1]; }
-  INLINE bool empty(void) { return ulen==0; }
-  INLINE int length(void) const { return ulen; }
-  INLINE int size(void) const { return ulen*sizeof(T); }
+  INLINE T &pop() { return buf[--ulen]; }
+  INLINE T &last() { return buf[ulen-1]; }
+  INLINE bool empty() { return ulen==0; }
+  INLINE int length() const { return ulen; }
+  INLINE int size() const { return ulen*sizeof(T); }
   INLINE const T &operator[](int i) const { assert(i>=0 && i<ulen); return buf[i]; }
   INLINE T &operator[](int i) { assert(i>=0 && i<ulen); return buf[i]; }
-  INLINE T *getbuf(void) { return buf; }
-  INLINE void realloc(void) { buf = (T*) ::realloc(buf, (alen *= 2)*sizeof(T)); }
+  INLINE T *getbuf() { return buf; }
+  INLINE void realloc() {
+    alen = max(2*alen,1);
+    buf = (T*)::realloc(buf, alen*sizeof(T));
+  }
   void setsize(int i) { for(; ulen>i; ulen--) buf[ulen-1].~T(); }
   T remove(int i) {
     T e = buf[i];
@@ -415,8 +435,8 @@ typedef vector<int> ivector;
 
 // simple intrusive list
 struct intrusive_list_node {
-  INLINE intrusive_list_node(void) { next = prev = this; }
-  INLINE bool in_list(void) const  { return this != next; }
+  INLINE intrusive_list_node() { next = prev = this; }
+  INLINE bool in_list() const  { return this != next; }
   intrusive_list_node *next;
   intrusive_list_node *prev;
 };
@@ -427,19 +447,19 @@ void unlink(intrusive_list_node *node);
 
 template<typename pointer, typename reference>
 struct intrusive_list_iterator {
-  INLINE intrusive_list_iterator(void): m_node(0) {}
+  INLINE intrusive_list_iterator(): m_node(0) {}
   INLINE intrusive_list_iterator(pointer iterNode) : m_node(iterNode) {}
-  INLINE reference operator*(void) const {
+  INLINE reference operator*() const {
     GBE_ASSERT(m_node);
     return *m_node;
   }
-  INLINE pointer operator->(void) const { return m_node; }
-  INLINE pointer node(void) const { return m_node; }
-  INLINE intrusive_list_iterator& operator++(void) {
+  INLINE pointer operator->() const { return m_node; }
+  INLINE pointer node() const { return m_node; }
+  INLINE intrusive_list_iterator& operator++() {
     m_node = static_cast<pointer>(m_node->next);
     return *this;
   }
-  INLINE intrusive_list_iterator& operator--(void) {
+  INLINE intrusive_list_iterator& operator--() {
     m_node = static_cast<pointer>(m_node->prev);
     return *this;
   }
@@ -466,13 +486,13 @@ private:
 struct intrusive_list_base {
 public:
   typedef size_t size_type;
-  INLINE void pop_back(void) { unlink(m_root.prev); }
-  INLINE void pop_front(void) { unlink(m_root.next); }
-  INLINE bool empty(void) const  { return !m_root.in_list(); }
-  size_type size(void) const;
+  INLINE void pop_back() { unlink(m_root.prev); }
+  INLINE void pop_front() { unlink(m_root.next); }
+  INLINE bool empty() const  { return !m_root.in_list(); }
+  size_type size() const;
 protected:
-  intrusive_list_base(void);
-  INLINE ~intrusive_list_base(void) {}
+  intrusive_list_base();
+  INLINE ~intrusive_list_base() {}
   intrusive_list_node m_root;
 private:
   intrusive_list_base(const intrusive_list_base&);
@@ -485,7 +505,7 @@ template<class T> struct intrusive_list : public intrusive_list_base {
   typedef intrusive_list_iterator<T*, T&> iterator;
   typedef intrusive_list_iterator<const T*, const T&> const_iterator;
 
-  intrusive_list(void) : intrusive_list_base() {
+  intrusive_list() : intrusive_list_base() {
     intrusive_list_node* testNode((T*)0);
     static_cast<void>(sizeof(testNode));
   }
@@ -493,19 +513,19 @@ template<class T> struct intrusive_list : public intrusive_list_base {
   void push_back(value_type* v) { link(v, &m_root); }
   void push_front(value_type* v) { link(v, m_root.next); }
 
-  iterator begin(void)  { return iterator(upcast(m_root.next)); }
-  iterator end(void)    { return iterator(upcast(&m_root)); }
-  iterator rbegin(void) { return iterator(upcast(m_root.prev)); }
-  iterator rend(void)   { return iterator(upcast(&m_root)); }
-  const_iterator begin(void) const  { return const_iterator(upcast(m_root.next)); }
-  const_iterator end(void) const    { return const_iterator(upcast(&m_root)); }
-  const_iterator rbegin(void) const { return const_iterator(upcast(m_root.prev)); }
-  const_iterator rend(void) const   { return const_iterator(upcast(&m_root)); }
+  iterator begin()  { return iterator(upcast(m_root.next)); }
+  iterator end()    { return iterator(upcast(&m_root)); }
+  iterator rbegin() { return iterator(upcast(m_root.prev)); }
+  iterator rend()   { return iterator(upcast(&m_root)); }
+  const_iterator begin() const  { return const_iterator(upcast(m_root.next)); }
+  const_iterator end() const    { return const_iterator(upcast(&m_root)); }
+  const_iterator rbegin() const { return const_iterator(upcast(m_root.prev)); }
+  const_iterator rend() const   { return const_iterator(upcast(&m_root)); }
 
-  INLINE value_type *front(void) { return upcast(m_root.next); }
-  INLINE value_type *back(void)  { return upcast(m_root.prev); }
-  INLINE const value_type *front(void) const { return upcast(m_root.next); }
-  INLINE const value_type *back(void) const  { return upcast(m_root.prev); }
+  INLINE value_type *front() { return upcast(m_root.next); }
+  INLINE value_type *back()  { return upcast(m_root.prev); }
+  INLINE const value_type *front() const { return upcast(m_root.next); }
+  INLINE const value_type *back() const  { return upcast(m_root.prev); }
 
   iterator insert(iterator pos, value_type* v) {
     link(v, pos.node());
@@ -522,8 +542,8 @@ template<class T> struct intrusive_list : public intrusive_list_base {
     return first;
   }
 
-  INLINE void clear(void) { erase(begin(), end()); }
-  INLINE void fastclear(void) { m_root.next = m_root.prev = &m_root; }
+  INLINE void clear() { erase(begin(), end()); }
+  INLINE void fastclear() { m_root.next = m_root.prev = &m_root; }
   static void remove(value_type* v) { unlink(v); }
 private:
   static INLINE node_type* upcast(intrusive_list_node* n) {
