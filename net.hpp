@@ -1,4 +1,3 @@
-#include <netinet/in.h>
 #include "sys.hpp"
 
 namespace q {
@@ -9,8 +8,8 @@ struct address {
   INLINE address() {}
   address(u32 addr, u16 port);
   address(const char *addr, u16 port);
-  u32 m_ip;
-  u16 m_port;
+  u32 m_ip;   // ip in host order
+  u16 m_port; // port in host order
 };
 
 // two way communication between host and remote

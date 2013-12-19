@@ -63,9 +63,9 @@ struct socket {
   int fd;
 };
 
-address::address(u32 addr, u16 port) : m_ip(htonl(addr)), m_port(htonl(port)) {}
+address::address(u32 addr, u16 port) : m_ip(addr), m_port(port) {}
 address::address(const char *addr, u16 port) :
-  m_ip(inet_addr(addr)), m_port(htons(port)) {}
+  m_ip(ntohl(inet_addr(addr))), m_port(port) {}
 
 /*-------------------------------------------------------------------------
  - unix boiler plate
@@ -97,8 +97,8 @@ INLINE sockaddr_in makeaddress(const address &addr) {
   sockaddr_in out;
   bzero(&out, sizeof(out));
   out.sin_family = AF_INET;
-  out.sin_addr.s_addr = addr.m_ip;
-  out.sin_port = addr.m_port;
+  out.sin_addr.s_addr = htonl(addr.m_ip);
+  out.sin_port = htons(addr.m_port);
   return out;
 }
 
@@ -108,8 +108,8 @@ int socket::receive(address &addr, buffer &buf) const {
   const int flags = MSG_NOSIGNAL;
   buf.m_len = recvfrom(fd, buf.m_data, MTU, flags, (sockaddr*)&outaddr, &addrlen);
   if (buf.m_len != u32(-1)) {
-    addr.m_port = outaddr.sin_port;
-    addr.m_ip = outaddr.sin_addr.s_addr;
+    addr.m_ip = ntohl(outaddr.sin_addr.s_addr);
+    addr.m_port = ntohs(outaddr.sin_port);
     return buf.m_len;
   }
   if (errno != EWOULDBLOCK) sys::fatal("net: error receiving data on socket");
@@ -144,6 +144,7 @@ static u64 gettime64() {
 void start() {
   basetime = gettime64();
   seed = time(NULL);
+  srand(seed);
 }
 void end() {}
 static u32 gettime() { return u32(gettime64() - basetime); }
@@ -151,11 +152,6 @@ static u32 gettime() { return u32(gettime64() - basetime); }
 /*-------------------------------------------------------------------------
  - implements network protocol
  -------------------------------------------------------------------------*/
-// we do not store more than 128 reliable *outstanding* reliable messages:
-// beyond that, we just consider that the channel timed out. the user will be
-// responsible to destroy it
-static const u32 MAX_RELIABLE_NUM = 128;
-
 struct internal_header;
 struct internal_server;
 struct internal_channel;
@@ -170,10 +166,11 @@ struct internal_header {
   u32 m_ackseq_ackrel; // 31 bits to acknowledge sequence. 1 bit for reliable ack
   u16 m_qport;         // handles port renaming by routers
 };
-static const u32 MAX_MSG_SZ = MTU - sizeof(internal_header);
+static const u32 HEADER_SZ = sizeof(u32[2]) + sizeof(u16);
+static const u32 MAX_MSG_SZ = MTU - HEADER_SZ;
 
 struct internal_channel {
-  internal_channel(u32 ip, u16 port, u16 qport, internal_server *owner = NULL);
+  internal_channel(u32 ip, u16 port, u16 qport, internal_server *owner);
   internal_channel(u32 ip, u16 port, u16 qport, u32 maxtimeout);
   ~internal_channel();
   void init(u32 ip, u16 port, u16 qport);
@@ -182,7 +179,7 @@ struct internal_channel {
   void send(bool reliable, const char *fmt, va_list args);
   int rcv(const char *fmt, va_list args);
   void flush();
-  void flush_reliable(buffer &buf);
+  int flush_reliable(buffer &buf);
   internal_server *m_owner; // set only for server->client communication
   socket*m_sock;            // owned by the server for a server channel
 
@@ -190,7 +187,7 @@ struct internal_channel {
   buffer m_incoming;     // message to process
   u32 m_incoming_offset; // offset where to pull data from msg
 
-  /* outgoing messages (reliable and not reliable */
+  /* outgoing messages (reliable and unreliable) */
   enum { REL, UNREL, MSG_NUM };
   vector<char> m_msg[MSG_NUM]; // current reliable and unreliable messages
   vector<u32> m_size[MSG_NUM]; // size of each message inside m_msg
@@ -225,6 +222,7 @@ struct internal_server {
 };
 
 INLINE const internal_header &internal_header::get(const buffer &buf) {
+  assert(buf.m_len >= HEADER_SZ);
   return (const internal_header&) buf.m_data;
 }
 
@@ -248,9 +246,9 @@ void internal_channel::init(u32 ip, u16 port, u16 qport) {
   m_ip = ip;
   m_port = port;
   m_qport = qport;
-  m_seq = m_ack = 0;
-  m_rel_seq = 0;
-  m_resend_rel = 0;
+  m_seq = 1;
+  m_ack = 0;
+  m_resend_rel = m_rel_seq = 0;
   m_remote_seq = m_remote_ack = 0;
   m_remote_update = gettime();
   m_atomic_size[REL] = m_atomic_size[UNREL] = m_atomic = 0;
@@ -280,7 +278,7 @@ bool internal_channel::istimedout(u32 curtime) {
 
 void internal_channel::send(bool reliable, const char *fmt, va_list args) {
   auto &msg = m_msg[reliable?REL:UNREL];
-  const auto offset = msg.size();
+  const auto offset = msg.length();
   while (char ch = *fmt) {
     switch (ch) {
 #define SEND(CHAR, TYPE, VA_ARG_TYPE) case CHAR: {\
@@ -297,7 +295,7 @@ void internal_channel::send(bool reliable, const char *fmt, va_list args) {
     ++fmt;
   }
   const auto idx = reliable?REL:UNREL;
-  const auto len = msg.size()-int(offset);
+  const auto len = msg.length()-int(offset);
   if (m_atomic)
     m_atomic_size[idx] += len;
   else if (len > int(MAX_MSG_SZ))
@@ -319,7 +317,7 @@ int internal_channel::rcv(const char *fmt, va_list args) {
           goto exit;\
         loopi(sizeof(TYPE))\
           dst[i] = m_incoming.m_data[m_incoming_offset++];\
-      }
+      } break;
       RCV('c', char)
       RCV('s', short)
       RCV('i', int)
@@ -350,10 +348,10 @@ exit:
   return sz;
 }
 
-void internal_channel::flush_reliable(buffer &buf) {
+int internal_channel::flush_reliable(buffer &buf) {
   auto &rel = m_msg[REL];
   auto &relsize = m_size[REL];
-  if (m_sent_rel.first == NULL && u32(rel.size()) <= MAX_MSG_SZ)
+  if (m_sent_rel.first == NULL && u32(rel.length()) <= MAX_MSG_SZ)
     m_sent_rel = rel.move();
   else if (m_sent_rel.first == NULL) { // we need to split the current reliable data stream
     u32 tot = 0, idx = 0;
@@ -368,11 +366,11 @@ void internal_channel::flush_reliable(buffer &buf) {
     // remove reliable data from the left of the stream
     m_sent_rel = makepair((char*)malloc(tot), tot);
     memcpy(m_sent_rel.first, &rel[0], tot);
-    memcpy(&rel[0], &rel[tot], rel.size()-tot);
+    memcpy(&rel[0], &rel[tot], rel.length()-tot);
 
-    // only keep the size of the items we still need to send
-    memcpy(&relsize[0], &relsize[idx], (relsize.size()-idx)*sizeof(u32));
-    relsize.setsize(relsize.size()-idx);
+    // only keep the length of the items we still need to send
+    memcpy(&relsize[0], &relsize[idx], (relsize.length()-idx)*sizeof(u32));
+    relsize.setsize(relsize.length()-idx);
   }
 
   // update the buffer with the reliable data
@@ -382,6 +380,7 @@ void internal_channel::flush_reliable(buffer &buf) {
     chan_make_header(this, buf, true);
     buf.copy(m_sent_rel.first, m_sent_rel.second);
   }
+  return m_sent_rel.second;
 }
 
 void internal_channel::flush() {
@@ -394,7 +393,8 @@ void internal_channel::flush() {
   // send reliable data first (never more than one packet)
   const address dstaddr(m_ip, m_port);
   buffer buf;
-  flush_reliable(buf);
+  if (flush_reliable(buf) == 0)
+    chan_make_header(this, buf, false);
 
   // then, send as much unreliable data we can, possibly creating extra packets
   // for it
@@ -407,11 +407,11 @@ void internal_channel::flush() {
       m_sock->send(dstaddr, buf);
       offset += tot;
       buf.m_len = tot = 0;
-      if (i != unrelsize.size()-1)
+      if (i != unrelsize.length()-1)
         chan_make_header(this, buf, false);
     }
     tot += unrelsize[i];
-    if (i == unrelsize.size()-1 && tot != 0)
+    if (i == unrelsize.length()-1 && tot != 0)
       buf.copy(&unrel[offset], tot);
   }
 
@@ -432,21 +432,21 @@ internal_channel *internal_server::active() {
     buffer buf;
     address addr;
     const int len = m_sock.receive(addr, buf);
-    if (len == -1) break;
+    if (len <= 0) break;
     const auto &header = internal_header::get(buf);
 
     // allocate a new channel if not already handled
     internal_channel *c;
     if ((c = findchannel(addr.m_ip, header.m_qport)) == NULL) {
-      if (u32(m_channels.size()) == m_maxclients) continue;
-      c = m_channels.add(new internal_channel(addr.m_ip, addr.m_port, header.m_qport));
+      if (u32(m_channels.length()) == m_maxclients) continue;
+      c = m_channels.add(new internal_channel(addr.m_ip, addr.m_port, header.m_qport, this));
     }
 
     // skip the channel if dead or if we already got a more recent package
     if (c->istimedout() || internal_header::get(buf).seq()<=c->m_remote_seq)
       continue;
     c->m_incoming = buf;
-    c->m_incoming_offset = sizeof(internal_header);
+    c->m_incoming_offset = HEADER_SZ;
     return c;
   }
   return NULL;
@@ -459,7 +459,7 @@ internal_channel *internal_server::timedout() {
 }
 
 void internal_server::remove(internal_channel *chan) {
-  u32 idx = 0, n = u32(m_channels.size());
+  u32 idx = 0, n = u32(m_channels.length());
   for (; idx < n; ++idx) if (chan == m_channels[idx]) break;
   if (idx == n) return;
   m_channels[idx] = m_channels[n-1];
