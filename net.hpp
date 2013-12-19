@@ -13,47 +13,27 @@ struct address {
   u16 m_port;
 };
 
-static const u32 MTU = 1400;
-
-// buffers are fixed-size-allocated for maximum simplicity
-struct buffer {
-  buffer(void) : len(0) {}
-  template <typename T> INLINE void append(const T &x) {
-    (T&)data[len]=x;
-    len+=sizeof(T);
-  }
-  INLINE void copy(const char *src, u32 sz) {
-    memcpy(data+len,src,sz);
-    len+=sz;
-  }
-  u32 len;
-  char data[MTU];
-};
-
-// very basic udp socket interface
-struct socket {
-  socket(u16 port = 0); // port == 0 means client (no bind operation)
-  ~socket();
-  int receive(buffer &buf) const;
-  int receive(address &addr, buffer &buf) const;
-  int send(const address &addr, const buffer &buf) const;
-  int fd;
-};
-
+// two way communication between host and remote
 struct channel {
-  static channel *create(const address &addr);
+  static channel *create(const address &addr, u32 maxtimeout);
   static void destroy(channel*);
-  void disconnect();
+  void atomic();
   void send(bool reliable, const char *fmt, ...);
   int rcv(const char *fmt, ...);
   void flush();
 };
 
+// handle multiple incoming connections. there is no explicit disconnection but
+// simply timedout notifications
 struct server {
-  static server *create(u16 port);
+  static server *create(u32 maxclients, u32 maxtimeout, u16 port);
   static void destroy(server*);
-  channel *activechannel();
+  channel *active();
+  channel *timedout();
 };
+
+void start();
+void end();
 
 } /* namespace net */
 } /* namespace q */

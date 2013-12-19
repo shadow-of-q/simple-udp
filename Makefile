@@ -3,12 +3,12 @@
 CXXOPTFLAGS=-Wall -Os -DNDEBUG -std=c++11
 CXXDEBUGFLAGS=-Wall -O0 -g -std=c++11
 CXXFLAGS=$(CXXDEBUGFLAGS) -I./
-CLIENT_OBJS=client.o net.o
-SERVER_OBJS=server.o net.o
+CLIENT_OBJS=client.o
+SERVER_OBJS=server.o
 all: client server
 HEADERS=sys.hpp net.hpp
-client.o: client.cpp $(HEADERS)
-server.o: server.cpp $(HEADERS)
+client.o: client.cpp net.cpp $(HEADERS)
+server.o: server.cpp net.cpp $(HEADERS)
 sys.o: sys.cpp $(HEADERS)
 
 client: $(CLIENT_OBJS)

@@ -382,7 +382,10 @@ template <typename T, u32 max_n=1024> struct hashtable : noncopyable {
 template <class T> struct vector : noncopyable {
   T *buf;
   int alen, ulen;
-  INLINE vector() : buf(NULL), alen(0), ulen(0) {}
+  INLINE vector(int len = 0) {
+    if (len) buf = (T*) malloc(len*sizeof(T)); else buf = NULL;
+    alen = ulen = len;
+  }
   INLINE ~vector() { setsize(0); free(buf); }
   INLINE T &add(const T &x) {
     if (ulen==alen) realloc();
@@ -400,6 +403,12 @@ template <class T> struct vector : noncopyable {
     buf = NULL;
     return dst;
   }
+  INLINE void moveto(vector<T> &other) {
+    other.~vector<T>();
+    other.alen = alen; alen = 0;
+    other.ulen = ulen; ulen = 0;
+    other.buf = buf;  buf = NULL;
+  }
   T *begin() { return buf; }
   T *end() { return buf+ulen; }
   const T *begin() const { return buf; }
@@ -409,6 +418,7 @@ template <class T> struct vector : noncopyable {
   INLINE bool empty() { return ulen==0; }
   INLINE int length() const { return ulen; }
   INLINE int size() const { return ulen*sizeof(T); }
+  INLINE bool empty() const { return size()==0; }
   INLINE const T &operator[](int i) const { assert(i>=0 && i<ulen); return buf[i]; }
   INLINE T &operator[](int i) { assert(i>=0 && i<ulen); return buf[i]; }
   INLINE T *getbuf() { return buf; }
