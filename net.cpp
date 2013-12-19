@@ -151,8 +151,8 @@ struct internal_channel {
 
   /* outgoing messages (reliable and not reliable */
   enum { REL, UNREL, MSG_NUM };
-  vector<char> m_msg[MSG_NUM];   // current reliable and unreliable messages
-  vector<u32> m_offset[MSG_NUM]; // positions of each individual message in m_msg
+  vector<char> m_msg[MSG_NUM]; // current reliable and unreliable messages
+  vector<u32> m_unrel_offset;  // positions of each message for unrel msg
 
   /* we save reliable data until we know it was received */
   ringbuffer<pair<char*,u32>, MAX_RELIABLE_NUM> m_outstanding_rel;
@@ -241,19 +241,20 @@ void internal_channel::send(bool reliable, const char *fmt, va_list args) {
     }
     ++fmt;
   }
-  if (msg.size()>offset)
-    m_offset[reliable?REL:UNREL].add(offset);
+  if (msg.size()>offset && !reliable)
+    m_unrel_offset.add(offset);
 }
 
 int internal_channel::rcv(const char *fmt, va_list args) {
   if (m_incoming == NULL) return 0;
   const u32 initial_offset = m_incoming_offset;
+  u32 sz = 0;
   while (char ch = *fmt) {
     switch (ch) {
 #define RCV(CHAR, TYPE)\
       case CHAR: {\
         const auto dst = va_arg(args, char*);\
-        if (m_incoming_offset+sizeof(TYPE) > m_incoming_len) goto error;\
+        if (m_incoming_offset+sizeof(TYPE) > m_incoming_len) goto exit;\
         loopi(sizeof(TYPE))\
           dst[i] = m_incoming->m_data[m_incoming_offset++];\
       }
@@ -272,9 +273,11 @@ int internal_channel::rcv(const char *fmt, va_list args) {
     m_last_seq = max(m_last_seq, ntohl(m_incoming->seq()));
     m_last_update = gettime();
   }
-  return m_incoming_offset - initial_offset;
-error:
-  return 0;
+  sz = m_incoming_offset - initial_offset;
+exit:
+  internal_msg::destroy(m_incoming);
+  m_incoming = NULL;
+  return sz;
 }
 
 static void chan_make_header(internal_channel *c, buffer &buf, bool rel) {
@@ -286,10 +289,8 @@ static void chan_make_header(internal_channel *c, buffer &buf, bool rel) {
 void internal_channel::flush() {
   // skip it completely if channel timed out
   if (istimedout()) {
-    loopi(MSG_NUM) {
-      m_msg[i].setsize(0);
-      m_offset[i].setsize(0);
-    }
+    loopi(MSG_NUM) m_msg[i].setsize(0);
+    m_unrel_offset.setsize(0);
     return;
   }
 
@@ -311,17 +312,16 @@ void internal_channel::flush() {
 
   // now, we append the unreliable data, using as many buffers as we need
   const auto unrel = m_msg[UNREL].move();
-  const auto &offsets = m_offset[UNREL];
-  loopv(offsets) {
+  loopv(m_unrel_offset) {
     u32 sz;
-    if (i==offsets.size()-1)
-      sz = unrel.second - offsets[i];
+    if (i==m_unrel_offset.size()-1)
+      sz = unrel.second - m_unrel_offset[i];
     else
-      sz = offsets[i+1] - offsets[i];
+      sz = m_unrel_offset[i+1] - m_unrel_offset[i];
     if (buf.len+sz > MTU) {
       m_sock->send(address(m_ip, m_port), buf);
       buf.len = 0;
-      if (i<offsets.size()-1) chan_make_header(this, buf, false);
+      if (i<m_unrel_offset.size()-1) chan_make_header(this, buf, false);
     }
   }
   if (buf.len > 0) m_sock->send(address(m_ip, m_port), buf);
