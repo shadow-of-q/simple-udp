@@ -3,17 +3,21 @@
 CXXOPTFLAGS=-Wall -Os -DNDEBUG -std=c++11
 CXXDEBUGFLAGS=-Wall -O0 -g -std=c++11
 CXXFLAGS=$(CXXDEBUGFLAGS) -I./
+all: client server net_client net_server too_large
+
+HEADERS=sys.hpp net.hpp net_protocol.hpp
+client.o: client.cpp net.cpp $(HEADERS)
+server.o: server.cpp net.cpp $(HEADERS)
+too_large.o: too_large.cpp $(HEADERS)
+net_client.o: net_client.cpp $(HEADERS)
+net_server.o: net_server.cpp $(HEADERS)
+sys.o: sys.cpp $(HEADERS)
+
+TOO_LARGE_OBJS=too_large.o net.o
 CLIENT_OBJS=client.o
 SERVER_OBJS=server.o
 NET_CLIENT_OBJS=net_client.o net.o
 NET_SERVER_OBJS=net_server.o net.o
-all: client server net_client net_server
-HEADERS=sys.hpp net.hpp
-client.o: client.cpp net.cpp $(HEADERS)
-server.o: server.cpp net.cpp $(HEADERS)
-net_client.o: net_client.cpp $(HEADERS)
-net_server.o: net_server.cpp $(HEADERS)
-sys.o: sys.cpp $(HEADERS)
 
 client: $(CLIENT_OBJS)
 	$(CXX) $(CXXFLAGS) -o client $(CLIENT_OBJS)
@@ -26,6 +30,9 @@ net_client: $(NET_CLIENT_OBJS)
 
 net_server: $(NET_SERVER_OBJS)
 	$(CXX) $(CXXFLAGS) -o net_server $(NET_SERVER_OBJS)
+
+too_large: $(TOO_LARGE_OBJS)
+	$(CXX) $(CXXFLAGS) -o too_large $(TOO_LARGE_OBJS)
 
 clean:
 	-rm -f $(NET_CLIENT_OBJS) $(NET_SERVER_OBJS) $(CLIENT_OBJS) $(SERVER_OBJS) \

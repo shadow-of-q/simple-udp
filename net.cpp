@@ -19,11 +19,17 @@
 namespace q {
 namespace sys {
 void fatal(const char *s, const char *o) {
-  sprintf_sd(m)("%s%s\n", s, o);
+  sprintf_sd(m)("fatal: %s%s\n", s, o);
+  fprintf(stderr, m);
+  fflush(stderr);
   exit(EXIT_FAILURE);
 }
 } /* namespace sys */
 } /* namespace q */
+
+#if defined(UTESTS)
+bool skipreliable = false;
+#endif
 
 namespace q {
 namespace net {
@@ -42,10 +48,12 @@ struct buffer {
     return *this;
   }
   template <typename T> INLINE void append(const T &x) {
+    assert(m_len + sizeof(T) <= MTU);
     (T&)m_data[m_len]=x;
     m_len+=sizeof(T);
   }
   INLINE void copy(const char *src, u32 sz) {
+    assert(m_len + sz <= MTU);
     memcpy(m_data+m_len, src, sz);
     m_len+=sz;
   }
@@ -179,9 +187,13 @@ struct internal_channel {
   void send(bool reliable, const char *fmt, va_list args);
   int rcv(const char *fmt, va_list args);
   void flush();
-  int flush_reliable(buffer &buf);
+  void flush(buffer &buf, const address &dstaddr, bool reliable);
+  void remove_sent_reliable();
+  bool handle_reception(const buffer &buf);
+  bool is_client_channel() const { return m_owner == NULL; }
+  /* internal boilerplate */
   internal_server *m_owner; // set only for server->client communication
-  socket*m_sock;            // owned by the server for a server channel
+  socket *m_sock;           // owned by the server for a server channel
 
   /* incoming message */
   buffer m_incoming;     // message to process
@@ -191,7 +203,7 @@ struct internal_channel {
   enum { REL, UNREL, MSG_NUM };
   vector<char> m_msg[MSG_NUM]; // current reliable and unreliable messages
   vector<u32> m_size[MSG_NUM]; // size of each message inside m_msg
-  pair<char*,u32> m_sent_rel;  // reliable data already sent
+  u32 m_rel_sent_size;         // what we sent to remote (if 0, we can send a new rel)
   u32 m_atomic_size[MSG_NUM];  // current size of the atomic group
   u32 m_atomic;                // group several sends in one atomic entity
 
@@ -223,7 +235,7 @@ struct internal_server {
 
 INLINE const internal_header &internal_header::get(const buffer &buf) {
   assert(buf.m_len >= HEADER_SZ);
-  return (const internal_header&) buf.m_data;
+  return (const internal_header&) buf.m_data[0];
 }
 
 static void chan_make_header(internal_channel *c, buffer &buf, bool rel) {
@@ -242,7 +254,6 @@ internal_channel::internal_channel(u32 ip, u16 port, u16 qport, u32 maxtimeout) 
 
 void internal_channel::init(u32 ip, u16 port, u16 qport) {
   m_incoming_offset = 0;
-  m_sent_rel = makepair((char*)NULL,0u);
   m_ip = ip;
   m_port = port;
   m_qport = qport;
@@ -251,6 +262,7 @@ void internal_channel::init(u32 ip, u16 port, u16 qport) {
   m_resend_rel = m_rel_seq = 0;
   m_remote_seq = m_remote_ack = 0;
   m_remote_update = gettime();
+  m_rel_sent_size = 0;
   m_atomic_size[REL] = m_atomic_size[UNREL] = m_atomic = 0;
 }
 
@@ -274,6 +286,56 @@ void internal_channel::atomic() {
 
 bool internal_channel::istimedout(u32 curtime) {
   return curtime-m_remote_update > m_maxtimeout;
+}
+
+bool internal_channel::handle_reception(const buffer &buf) {
+  const auto &header = internal_header::get(buf);
+  if (istimedout() || header.seq()<=m_remote_seq)
+    return false;
+  m_incoming = buf;
+  m_incoming_offset = HEADER_SZ;
+
+  // update the information about remote
+  if (header.rel()) m_remote_ack ^= 1;
+  m_remote_seq = header.seq();
+  m_remote_update = gettime();
+
+  // look if remote got the latest reliable command; if so, we remove the
+  // reliable data we sent since we do not need it anymore. Otherwise, we
+  // resend the data we sent previously and possibly more if we can (i.e. we
+  // also append the reliable data we got at the same time)
+  if (header.ackseq() >= m_rel_seq) {
+    m_rel_sent_size = 0;
+    if (header.ackrel() == m_ack) remove_sent_reliable();
+  }
+  return true;
+}
+
+void internal_channel::remove_sent_reliable() {
+  auto &rel = m_msg[REL];
+  auto &relsize = m_size[REL];
+
+  // scan and find the first item we did not send
+  u32 tot = 0, idx = 0;
+  for (auto r : rel) {
+    if (tot + r > m_rel_sent_size) break;
+    else {
+      tot += r;
+      ++idx;
+    }
+  }
+  assert(tot == m_rel_sent_size);
+  m_rel_sent_size = 0;
+
+  // remove reliable data from the left of the stream
+  const auto len = rel.length() - tot;
+  if (len) memcpy(&rel[0], &rel[tot], len);
+  rel.setsize(rel.length()-tot);
+
+  // only keep the length of the items we still need to send
+  const auto szlen = relsize.length()-idx;
+  if (szlen) memcpy(&relsize[0], &relsize[idx], szlen*sizeof(u32));
+  relsize.setsize(szlen);
 }
 
 void internal_channel::send(bool reliable, const char *fmt, va_list args) {
@@ -305,19 +367,24 @@ void internal_channel::send(bool reliable, const char *fmt, va_list args) {
 }
 
 int internal_channel::rcv(const char *fmt, va_list args) {
-  if (m_incoming.m_len <= m_incoming_offset) return 0;
+  // are we already done with this channel? if so, try to get something from the
+  // socket
+  if (m_incoming.m_len <= m_incoming_offset) {
+    buffer buf;
+    if (!is_client_channel()) return 0; // socket is handled by server
+    if (m_sock->receive(buf)<= 0 || !handle_reception(buf)) return 0;
+  }
+
+  // now, we can parse the stream
   const u32 initial_offset = m_incoming_offset;
-  u32 sz = 0;
   while (char ch = *fmt) {
     switch (ch) {
-#define RCV(CHAR, TYPE)\
-      case CHAR: {\
-        const auto dst = va_arg(args, char*);\
-        if (m_incoming_offset+sizeof(TYPE)>m_incoming.m_len)\
-          goto exit;\
-        loopi(sizeof(TYPE))\
-          dst[i] = m_incoming.m_data[m_incoming_offset++];\
-      } break;
+#define RCV(CHAR, TYPE) case CHAR: {\
+  const auto dst = va_arg(args, char*);\
+  if (m_incoming_offset+sizeof(TYPE)>m_incoming.m_len) return 0;\
+  loopi(sizeof(TYPE)) dst[i] = m_incoming.m_data[m_incoming_offset++];\
+  break;\
+}
       RCV('c', char)
       RCV('s', short)
       RCV('i', int)
@@ -326,97 +393,48 @@ int internal_channel::rcv(const char *fmt, va_list args) {
     }
     ++fmt;
   }
-
-  // we processed the message completely; as far as we know, there is no
-  // corruption, so we can update the ack fields accordingly
-  if (m_incoming_offset == m_incoming.m_len) {
-    const auto &header = internal_header::get(m_incoming);
-    if (header.ackseq() >= m_rel_seq) {
-      if (header.ackrel() != m_ack)
-        m_resend_rel = 1;
-      else {
-        m_sent_rel.first = NULL;
-        m_sent_rel.second = 0;
-      }
-    }
-    if (header.rel()) m_remote_ack ^= 1;
-    m_remote_seq = ntohl(header.seq());
-    m_remote_update = gettime();
-  }
-  sz = m_incoming_offset - initial_offset;
-exit:
-  return sz;
+  return m_incoming_offset - initial_offset;
 }
 
-int internal_channel::flush_reliable(buffer &buf) {
-  auto &rel = m_msg[REL];
-  auto &relsize = m_size[REL];
-  if (m_sent_rel.first == NULL && u32(rel.length()) <= MAX_MSG_SZ)
-    m_sent_rel = rel.move();
-  else if (m_sent_rel.first == NULL) { // we need to split the current reliable data stream
-    u32 tot = 0, idx = 0;
-    for (auto r : relsize) {
-      if (tot + r > MAX_MSG_SZ) break;
-      else {
-        tot += r;
-        ++idx;
-      }
+void internal_channel::flush(buffer &buf, const address &dstaddr, bool reliable) {
+  auto &msg = m_msg[reliable?REL:UNREL];
+  auto &msgsize = m_size[reliable?REL:UNREL];
+
+  assert(buf.m_len == 0 || !reliable);
+  u32 tot = 0, offset = 0;
+  loopv(msgsize) {
+    u32 next = 0;
+    if (buf.m_len + tot == 0) chan_make_header(this, buf, reliable);
+    if (i != msgsize.length()-1) next = msgsize[i+1];
+    tot += msgsize[i];
+    m_rel_sent_size += reliable ? msgsize[i] : 0;
+    if (buf.m_len + tot + next > MTU) {
+      buf.copy(&msg[offset], tot);
+      m_sock->send(dstaddr, buf);
+      offset += tot;
+      buf.m_len = tot = 0;
+      if (reliable) return;
     }
-
-    // remove reliable data from the left of the stream
-    m_sent_rel = makepair((char*)malloc(tot), tot);
-    memcpy(m_sent_rel.first, &rel[0], tot);
-    memcpy(&rel[0], &rel[tot], rel.length()-tot);
-
-    // only keep the length of the items we still need to send
-    memcpy(&relsize[0], &relsize[idx], (relsize.length()-idx)*sizeof(u32));
-    relsize.setsize(relsize.length()-idx);
   }
-
-  // update the buffer with the reliable data
-  if (m_sent_rel.second > 0) {
-    assert(m_sent_rel.second <= MAX_MSG_SZ && buf.m_len == 0);
-    m_rel_seq = m_seq;
-    chan_make_header(this, buf, true);
-    buf.copy(m_sent_rel.first, m_sent_rel.second);
-  }
-  return m_sent_rel.second;
+  if (tot > 0) buf.copy(&msg[offset], tot);
 }
 
 void internal_channel::flush() {
-  if (istimedout()) { // skip it completely if channel timed out
+  // skip it completely if channel timed out
+  if (istimedout()) {
+    m_incoming.m_len = 0;
     loopi(MSG_NUM) m_msg[i].setsize(0);
     loopi(MSG_NUM) m_size[i].setsize(0);
     return;
   }
 
-  // send reliable data first (never more than one packet)
-  const address dstaddr(m_ip, m_port);
   buffer buf;
-  if (flush_reliable(buf) == 0)
-    chan_make_header(this, buf, false);
-
-  // then, send as much unreliable data we can, possibly creating extra packets
-  // for it
-  auto &unrel = m_msg[UNREL];
-  auto &unrelsize = m_size[UNREL];
-  u32 tot = 0, offset = 0;
-  loopv(unrelsize) {
-    if (buf.m_len + tot >= MTU) {
-      buf.copy(&unrel[offset], tot);
-      m_sock->send(dstaddr, buf);
-      offset += tot;
-      buf.m_len = tot = 0;
-      if (i != unrelsize.length()-1)
-        chan_make_header(this, buf, false);
-    }
-    tot += unrelsize[i];
-    if (i == unrelsize.length()-1 && tot != 0)
-      buf.copy(&unrel[offset], tot);
-  }
-
-  // send the remaining data
-  if (buf.m_len != 0) m_sock->send(dstaddr, buf);
+  const address dstaddr(m_ip, m_port);
+  if (m_rel_sent_size == 0) flush(buf, dstaddr, true);
+  flush(buf, dstaddr, false);
+  if (buf.m_len) m_sock->send(dstaddr, buf);
+  m_msg[UNREL].setsize(0);
+  m_size[UNREL].setsize(0);
 }
 
 internal_server::internal_server(u32 maxclients, u32 maxtimeout, u16 port) :
@@ -441,12 +459,7 @@ internal_channel *internal_server::active() {
       if (u32(m_channels.length()) == m_maxclients) continue;
       c = m_channels.add(new internal_channel(addr.m_ip, addr.m_port, header.m_qport, this));
     }
-
-    // skip the channel if dead or if we already got a more recent package
-    if (c->istimedout() || internal_header::get(buf).seq()<=c->m_remote_seq)
-      continue;
-    c->m_incoming = buf;
-    c->m_incoming_offset = HEADER_SZ;
+    if (!c->handle_reception(buf)) continue;
     return c;
   }
   return NULL;
