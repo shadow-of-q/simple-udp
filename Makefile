@@ -36,5 +36,5 @@ too_large: $(TOO_LARGE_OBJS)
 
 clean:
 	-rm -f $(NET_CLIENT_OBJS) $(NET_SERVER_OBJS) $(CLIENT_OBJS) $(SERVER_OBJS) \
-	client server net_client net_server
+	client server net_client net_server too_large
 
