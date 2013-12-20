@@ -12,8 +12,12 @@ struct address {
   u16 m_port; // port in host order
 };
 
+// to initialize a local server and channel
+static const struct local_type {} local;
+
 // two way communication between host and remote
 struct channel {
+  static channel *create(local_type);
   static channel *create(const address &addr, u32 maxtimeout);
   static void destroy(channel*);
   void atomic();
@@ -23,8 +27,9 @@ struct channel {
 };
 
 // handle multiple incoming connections. there is no explicit disconnection but
-// simply timedout notifications
+// simply time out notifications
 struct server {
+  static server *create(local_type);
   static server *create(u32 maxclients, u32 maxtimeout, u16 port);
   static void destroy(server*);
   channel *active();

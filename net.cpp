@@ -27,10 +27,6 @@ void fatal(const char *s, const char *o) {
 } /* namespace sys */
 } /* namespace q */
 
-#if defined(UTESTS)
-bool skipreliable = false;
-#endif
-
 namespace q {
 namespace net {
 
@@ -156,6 +152,45 @@ void start() {
 }
 void end() {}
 static u32 gettime() { return u32(gettime64() - basetime); }
+
+static void send(const char *fmt, vector<char> &msg, va_list args) {
+  while (char ch = *fmt) {
+    switch (ch) {
+#define SEND(CHAR, TYPE, VA_ARG_TYPE) case CHAR: {\
+  union { TYPE x; char bytes[sizeof(TYPE)]; };\
+  x = TYPE(va_arg(args, VA_ARG_TYPE));\
+  loopi(sizeof(TYPE)) msg.add(bytes[i]);\
+  break;\
+}
+      SEND('c', char, int)
+      SEND('s', short, int)
+      SEND('i', int, int)
+#undef SEND
+    }
+    ++fmt;
+  }
+}
+
+static u32 rcv(const char *fmt, const char *msg, u32 &offset, u32 sz, va_list args) {
+  const u32 initial_offset = offset;
+  while (char ch = *fmt) {
+    switch (ch) {
+#define RCV(CHAR, TYPE) case CHAR: {\
+  const auto dst = va_arg(args, char*);\
+  if (offset+sizeof(TYPE)>sz) return 0;\
+  loopi(sizeof(TYPE)) dst[i] = msg[offset++];\
+  break;\
+}
+      RCV('c', char)
+      RCV('s', short)
+      RCV('i', int)
+#undef RCV
+      default: sys::fatal("net: unknown format string");
+    }
+    ++fmt;
+  }
+  return offset - initial_offset;
+}
 
 /*-------------------------------------------------------------------------
  - implements network protocol
@@ -341,21 +376,7 @@ void internal_channel::remove_sent_reliable() {
 void internal_channel::send(bool reliable, const char *fmt, va_list args) {
   auto &msg = m_msg[reliable?REL:UNREL];
   const auto offset = msg.length();
-  while (char ch = *fmt) {
-    switch (ch) {
-#define SEND(CHAR, TYPE, VA_ARG_TYPE) case CHAR: {\
-  union { TYPE x; char bytes[sizeof(TYPE)]; };\
-  x = TYPE(va_arg(args, VA_ARG_TYPE));\
-  loopi(sizeof(TYPE)) msg.add(bytes[i]);\
-  break;\
-}
-      SEND('c', char, int)
-      SEND('s', short, int)
-      SEND('i', int, int)
-#undef SEND
-    }
-    ++fmt;
-  }
+  net::send(fmt, msg, args);
   const auto idx = reliable?REL:UNREL;
   const auto len = msg.length()-int(offset);
   if (m_atomic)
@@ -374,7 +395,10 @@ int internal_channel::rcv(const char *fmt, va_list args) {
     if (!is_client_channel()) return 0; // socket is handled by server
     if (m_sock->receive(buf)<= 0 || !handle_reception(buf)) return 0;
   }
-
+  const char *msg = m_incoming.m_data;
+  const u32 len = m_incoming.m_len;
+  return net::rcv(fmt, msg, m_incoming_offset, len, args);
+#if 0
   // now, we can parse the stream
   const u32 initial_offset = m_incoming_offset;
   while (char ch = *fmt) {
@@ -394,6 +418,7 @@ int internal_channel::rcv(const char *fmt, va_list args) {
     ++fmt;
   }
   return m_incoming_offset - initial_offset;
+#endif
 }
 
 void internal_channel::flush(buffer &buf, const address &dstaddr, bool reliable) {
@@ -480,16 +505,29 @@ void internal_server::remove(internal_channel *chan) {
 }
 
 /*-------------------------------------------------------------------------
+ - local interface
+ -------------------------------------------------------------------------*/
+static server  * const local_server = (server*) 0x1;
+static channel * const local_server_channel = (channel*) 0x2;
+static channel * const local_client_channel = (channel*) 0x3;
+static vector<char> s2c, c2s;
+static u32 s2c_offset = 0, c2s_offset = 0;
+
+/*-------------------------------------------------------------------------
  - public interface
  -------------------------------------------------------------------------*/
 #define CAST(TYPE, X) ((internal_##TYPE *)X)
 
 /* channel interface */
+channel *channel::create(local_type) { return local_client_channel; }
 channel *channel::create(const address &addr, u32 maxtimeout) {
   const u32 qport = rand()&0xffff;
   return (channel*) (new internal_channel(addr.m_ip, addr.m_port, qport, maxtimeout));
 }
-void channel::destroy(channel *c) { delete CAST(channel, c); }
+void channel::destroy(channel *c) {
+  if (c != local_client_channel && c != local_server_channel)
+    delete CAST(channel, c);
+}
 void channel::send(bool reliable, const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
@@ -507,10 +545,11 @@ int channel::rcv(const char *fmt, ...) {
 void channel::flush() { CAST(channel,this)->flush(); }
 
 /* server interface */
+server *server::create(local_type) { return local_server; }
 server *server::create(u32 maxclients, u32 maxtimeout, u16 port) {
   return (server*) (new internal_server(maxclients, maxtimeout, port));
 }
-void server::destroy(server *s) { delete CAST(server,s); }
+void server::destroy(server *s) { if (s != local_server) delete CAST(server,s); }
 channel *server::active() { return (channel*) CAST(server,this)->active(); }
 channel *server::timedout() { return (channel*) CAST(server,this)->timedout(); }
 
