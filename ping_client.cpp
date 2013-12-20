@@ -21,7 +21,8 @@ float millis() {
 int main(int argc, const char *argv[]) {
   using namespace q;
   net::start();
-  const net::address addr("2.25.198.185", 50000);
+  // const net::address addr("2.25.198.185", 50000);
+  const net::address addr("127.0.0.1", 1234);
   const auto chan = net::channel::create(addr, 50000);
   loopi(100) {
     float start = millis();

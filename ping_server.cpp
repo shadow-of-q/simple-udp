@@ -11,6 +11,7 @@ int main(int argc, const char *argv[]) {
   for (;;) {
     while ((chan = server->active()) == NULL);
     chan->send(false, "%i", 0);
+    chan->flush();
   }
 
   if (chan) net::channel::destroy(chan);
