@@ -13,7 +13,7 @@ struct address {
 };
 
 // to initialize a local server and channel
-static const struct local_type {} local;
+static const struct local_type {local_type(){}} local;
 
 // two way communication between host and remote
 struct channel {

@@ -1,7 +1,10 @@
-#CXX=clang++
+# clang
+CXX=clang++
+CXXDEBUGFLAGS=-Wall -O0 -g -std=c++11 -fsanitize=address
+
 #CXX=~/src/emscripten/em++
 CXXOPTFLAGS=-Wall -Os -DNDEBUG -std=c++11
-CXXDEBUGFLAGS=-Wall -O0 -g -std=c++11
+#CXXDEBUGFLAGS=-Wall -O0 -g -std=c++11
 CXXFLAGS=$(CXXDEBUGFLAGS) -I./
 all: client server net_client net_server too_large ping_server ping_client local
 
