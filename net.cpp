@@ -398,27 +398,6 @@ int internal_channel::rcv(const char *fmt, va_list args) {
   const char *msg = m_incoming.m_data;
   const u32 len = m_incoming.m_len;
   return net::rcv(fmt, msg, m_incoming_offset, len, args);
-#if 0
-  // now, we can parse the stream
-  const u32 initial_offset = m_incoming_offset;
-  while (char ch = *fmt) {
-    switch (ch) {
-#define RCV(CHAR, TYPE) case CHAR: {\
-  const auto dst = va_arg(args, char*);\
-  if (m_incoming_offset+sizeof(TYPE)>m_incoming.m_len) return 0;\
-  loopi(sizeof(TYPE)) dst[i] = m_incoming.m_data[m_incoming_offset++];\
-  break;\
-}
-      RCV('c', char)
-      RCV('s', short)
-      RCV('i', int)
-#undef RCV
-      default: sys::fatal("net: unknown format string");
-    }
-    ++fmt;
-  }
-  return m_incoming_offset - initial_offset;
-#endif
 }
 
 void internal_channel::flush(buffer &buf, const address &dstaddr, bool reliable) {
@@ -508,10 +487,26 @@ void internal_server::remove(internal_channel *chan) {
  - local interface
  -------------------------------------------------------------------------*/
 static server  * const local_server = (server*) 0x1;
-static channel * const local_server_channel = (channel*) 0x2;
-static channel * const local_client_channel = (channel*) 0x3;
+static channel * const local_s2c = (channel*) 0x2;
+static channel * const local_c2s = (channel*) 0x3;
 static vector<char> s2c, c2s;
 static u32 s2c_offset = 0, c2s_offset = 0;
+static const u32 compacting_size = 1024*1024;
+
+static u32 localrcv(const char *fmt, vector<char> &msg, u32 &offset, va_list args) {
+  const auto read = rcv(fmt, &msg[0], offset, msg.length(), args);
+  if (offset >= compacting_size) {
+    const u32 compacted_sz = msg.length()-offset;
+    vector<char> compacted(compacted_sz);
+    memcpy(&compacted[0], &msg[offset], compacted_sz);
+    compacted.moveto(msg);
+  }
+  return read;
+}
+
+static INLINE bool islocal(const channel *c) {
+  return c == local_s2c || c == local_c2s;
+}
 
 /*-------------------------------------------------------------------------
  - public interface
@@ -519,39 +514,59 @@ static u32 s2c_offset = 0, c2s_offset = 0;
 #define CAST(TYPE, X) ((internal_##TYPE *)X)
 
 /* channel interface */
-channel *channel::create(local_type) { return local_client_channel; }
+channel *channel::create(local_type) { return local_c2s; }
 channel *channel::create(const address &addr, u32 maxtimeout) {
   const u32 qport = rand()&0xffff;
   return (channel*) (new internal_channel(addr.m_ip, addr.m_port, qport, maxtimeout));
 }
-void channel::destroy(channel *c) {
-  if (c != local_client_channel && c != local_server_channel)
-    delete CAST(channel, c);
-}
+void channel::destroy(channel *c) { if (!islocal(c)) delete CAST(channel, c); }
 void channel::send(bool reliable, const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
-  CAST(channel,this)->send(reliable, fmt, args);
+  if (this == local_s2c)
+    net::send(fmt, s2c, args);
+  else if (this == local_c2s)
+    net::send(fmt, c2s, args);
+  else
+    CAST(channel,this)->send(reliable, fmt, args);
   va_end(args);
 }
-void channel::atomic() { CAST(channel,this)->atomic(); }
+void channel::atomic() { if (!islocal(this)) CAST(channel,this)->atomic(); }
 int channel::rcv(const char *fmt, ...) {
+  int len;
   va_list args;
   va_start(args, fmt);
-  const int len = CAST(channel,this)->rcv(fmt, args);
+  if (this == local_s2c)
+    len = localrcv(fmt, c2s, c2s_offset, args);
+  else if (this == local_c2s)
+    len = localrcv(fmt, s2c, s2c_offset, args);
+  else
+    len = CAST(channel,this)->rcv(fmt, args);
   va_end(args);
   return len;
 }
-void channel::flush() { CAST(channel,this)->flush(); }
+void channel::flush() { if (!islocal(this)) CAST(channel,this)->flush(); }
 
 /* server interface */
 server *server::create(local_type) { return local_server; }
 server *server::create(u32 maxclients, u32 maxtimeout, u16 port) {
   return (server*) (new internal_server(maxclients, maxtimeout, port));
 }
-void server::destroy(server *s) { if (s != local_server) delete CAST(server,s); }
-channel *server::active() { return (channel*) CAST(server,this)->active(); }
-channel *server::timedout() { return (channel*) CAST(server,this)->timedout(); }
+void server::destroy(server *s) {
+  if (s != local_server) delete CAST(server,s);
+}
+channel *server::active() {
+  if (this == local_server)
+    return u32(c2s.length()) == c2s_offset ? NULL : local_s2c;
+  else
+    return (channel*) CAST(server,this)->active();
+}
+channel *server::timedout() {
+  if (this == local_server)
+    return NULL;
+  else
+    return (channel*) CAST(server,this)->timedout();
+}
 
 #undef CAST
 } /* namespace net */
