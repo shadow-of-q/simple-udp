@@ -500,6 +500,7 @@ static u32 localrcv(const char *fmt, vector<char> &msg, u32 &offset, va_list arg
     vector<char> compacted(compacted_sz);
     memcpy(&compacted[0], &msg[offset], compacted_sz);
     compacted.moveto(msg);
+    offset = 0;
   }
   return read;
 }
